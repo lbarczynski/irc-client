@@ -1,30 +1,42 @@
 #include "TcpClient.h"
 
+//Size of each chunk of data received, try changing this
+#define CHUNK_SIZE 512
+#define SOCKET_DOMAIN AF_INET
+#define SOCKET_TYPE SOCK_STREAM
+#define SOCKET_PROTOCOL 0 // Specifying a protocol of 0 causes socket() to use an unspecified default protocol appropriate for the requested socket type.
+
 TcpClient::TcpClient(string address, int port)
 {
     this->address = address;
     this->port = port;
+    this->socket_fd = -1;
 }
 
-bool TcpClient::connect()
+bool TcpClient::create_socket()
 {
-    sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock == -1)
+    socket_fd = ::socket(SOCKET_DOMAIN, SOCKET_TYPE, SOCKET_PROTOCOL);
+    if (socket_fd == -1)
     {
-        show_error("Could not create socket");
+        perror("Could not create socket");
         return false;
     }
 
-    cout << "Socket created\n";
+    cout << "Socket created" << endl;
+    return true;
+}
 
+void TcpClient::setup_address_port()
+{
     //setup address structure
-    if (inet_addr(address.c_str()) == -1)
+    const char *address_cstr = address.c_str();
+    if (inet_addr(address_cstr) == -1)
     {
-        struct hostent *he;
+        struct hostent *host_entity;
         struct in_addr **addr_list;
 
         //resolve the hostname, its not an ip address
-        if ((he = gethostbyname(address.c_str())) == NULL)
+        if ((host_entity = gethostbyname(address_cstr)) == NULL)
         {
             //gethostbyname failed
             herror("gethostbyname");
@@ -32,29 +44,33 @@ bool TcpClient::connect()
         }
 
         //Cast the h_addr_list to in_addr , since h_addr_list also has the ip address in long format only
-        addr_list = (struct in_addr **)he->h_addr_list;
-
+        addr_list = (struct in_addr **)host_entity->h_addr_list;
         for (int i = 0; addr_list[i] != NULL; i++)
         {
-            //strcpy(ip , inet_ntoa(*addr_list[i]) );
             server.sin_addr = *addr_list[i];
-
             cout << address << " resolved to " << inet_ntoa(*addr_list[i]) << endl;
-
             break;
         }
     }
     //plain ip address
     else
     {
-        server.sin_addr.s_addr = inet_addr(address.c_str());
+        server.sin_addr.s_addr = inet_addr(address_cstr);
     }
 
-    server.sin_family = AF_INET;
+    server.sin_family = SOCKET_DOMAIN;
     server.sin_port = htons(port);
+}
 
+bool TcpClient::connect()
+{
+    if (!create_socket())
+    {
+        return false;
+    }
+    setup_address_port();
     //Connect to remote server
-    if (::connect(sock, (struct sockaddr *)&server, sizeof(server)) < 0)
+    if (::connect(socket_fd, (struct sockaddr *)&server, sizeof(server)) < 0)
     {
         perror("connect failed. Error");
         return false;
@@ -64,97 +80,60 @@ bool TcpClient::connect()
     return true;
 }
 
-//Size of each chunk of data received, try changing this
-#define CHUNK_SIZE 512
-
-/*
-    Receive data in multiple chunks by checking a non-blocking socket
-    Timeout in seconds
-*/
-string TcpClient::recv_timeout(int s , int timeout)
-{
-    int size_recv , total_size= 0;
-    struct timeval begin , now;
-    char chunk[CHUNK_SIZE];
-    double timediff;
-
-    string toReturn = "";
-     
-    //make socket non blocking
-    fcntl(s, F_SETFL, O_NONBLOCK);
-     
-    //beginning time
-    gettimeofday(&begin , NULL);
-     
-    while(1)
-    {
-        gettimeofday(&now , NULL);
-         
-        //time elapsed in seconds
-        timediff = (now.tv_sec - begin.tv_sec) + 1e-6 * (now.tv_usec - begin.tv_usec);
-         
-        //if you got some data, then break after timeout
-        if( total_size > 0 && timediff > timeout )
-        {
-            break;
-        }
-         
-        //if you got no data at all, wait a little longer, twice the timeout
-        else if( timediff > timeout*2)
-        {
-            break;
-        }
-         
-        memset(chunk ,0 , CHUNK_SIZE);  //clear the variable
-        if((size_recv =  recv(s , chunk , CHUNK_SIZE , 0) ) < 0)
-        {
-            //if nothing was received then we want to wait a little before trying again, 0.1 seconds
-            usleep(100000);
-        }
-        else
-        {
-            total_size += size_recv;
-            toReturn += chunk;
-            //reset beginning time
-            gettimeofday(&begin , NULL);
-        }
-    }
-     
-    return toReturn;
-}
-
 string TcpClient::receive_data(int size = 512)
 {
+    char buffer[size];
+    const int flags = 0;
+    string received_message = "";
+    size_t bytes_received = 0;
+    do
+    {
+        bytes_received = ::recv(socket_fd, buffer, sizeof(buffer), flags);
+        if (bytes_received < 0)
+        {
+            puts("recv failed");
+            return received_message;
+        }
+        received_message += sub_array(buffer, 0, bytes_received);
+        buffer[0] = 0; // clear buffer array
+    } while (bytes_received >= size);
+    // TODO: that should be moved to irc clinet!
+    string endline_str = "\r\n";
+    int rm_l = received_message.length();
+    int el_l = endline_str.length();
+    if(rm_l >= el_l && received_message.substr(rm_l - el_l, el_l).find(endline_str) != string::npos)
+    {
+        received_message = received_message.substr(0, rm_l - el_l);
+    }
 
-    return recv_timeout(sock, 4);
-    // cout << "receive_data()" << endl;
-    // char buffer[size];
-    // string reply;
+    return received_message;
+}
 
-    // //Receive a reply from the server
-    // if (recv(sock, buffer, sizeof(buffer), 0) < 0)
-    // {
-    //     puts("recv failed");
-    // }
+// TODO: move this to external util class
+string TcpClient::sub_array(char *array, int begin, size_t size)
+{
+    char buffer[size];
+    int j = 0;
+    for (int i = begin; i < begin + size; i++)
+    {
+        buffer[j++] = array[i];
+    }
 
-    // reply = buffer;
-    // return reply;
+    return buffer;
 }
 
 bool TcpClient::send_data(string data)
 {
-    //Send some data
-    if (send(sock, data.c_str(), strlen(data.c_str()), 0) < 0)
+    const char *data_cstr = data.c_str();
+    const int str_len = strlen(data_cstr);
+    const int flags = 0;
+
+    ssize_t bytes_sent = ::send(socket_fd, data_cstr, str_len, flags);
+    if (bytes_sent < 0)
     {
-        perror("Send failed : ");
+        string error_msg = "Send failed : " + data;
+        perror(error_msg.c_str());
         return false;
     }
-    cout << "Data send\n";
-
     return true;
-}
-
-void TcpClient::show_error(const char *msg)
-{
-    cout << msg << endl;
 }

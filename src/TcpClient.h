@@ -23,8 +23,9 @@ class TcpClient
   private:
     std::string address;
     int port;
-    int sock;
+    int socket_fd; // file descriptor that can be used in function calls that operate on sockets
     struct sockaddr_in server;
-    void show_error(const char *msg);
-    string recv_timeout(int s , int timeout);
+    bool create_socket();
+    void setup_address_port();
+    string sub_array(char * array, int begin, size_t size);
 };
